@@ -213,3 +213,4 @@ MIT
 - [2026-02-10 02:27:44] Update configuration
 - [2025-11-03 02:27:44] Improve error handling
 - [2026-02-20 02:27:44] Improve UI/UX
+- [2025-08-09 02:27:44] Add API endpoints
