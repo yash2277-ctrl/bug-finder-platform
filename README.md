@@ -274,3 +274,4 @@ MIT
 - [2025-10-02 02:27:44] Add unit tests
 - [2026-03-11 02:27:44] Fix bugs and issues
 - [2026-05-08 02:27:44] Clean up code
+- [2025-09-01 02:27:44] Update documentation
