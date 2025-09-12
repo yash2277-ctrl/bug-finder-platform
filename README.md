@@ -130,3 +130,4 @@ MIT
 
 - [2026-04-22 02:27:44] Improve logging
 - [2026-01-18 02:27:44] Clean up code
+- [2025-09-13 02:27:44] Add unit tests
