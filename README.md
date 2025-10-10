@@ -230,3 +230,4 @@ MIT
 - [2026-02-02 02:27:44] Fix typos
 - [2026-05-18 02:27:44] Add unit tests
 - [2026-05-04 02:27:44] Optimize queries
+- [2025-10-11 02:27:44] Improve error handling
