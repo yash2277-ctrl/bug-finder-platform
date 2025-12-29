@@ -216,3 +216,4 @@ MIT
 - [2025-08-09 02:27:44] Add API endpoints
 - [2025-08-19 02:27:44] Improve performance
 - [2025-12-12 02:27:44] Improve accessibility
+- [2025-12-30 02:27:44] Improve error handling
