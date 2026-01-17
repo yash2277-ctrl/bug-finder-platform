@@ -129,3 +129,4 @@ MIT
 ## Commit Log
 
 - [2026-04-22 02:27:44] Improve logging
+- [2026-01-18 02:27:44] Clean up code
