@@ -140,3 +140,4 @@ MIT
 - [2026-05-16 02:27:44] Improve UI/UX
 - [2025-12-11 02:27:44] Clean up code
 - [2025-12-17 02:27:44] Improve performance
+- [2026-04-18 02:27:44] Add API endpoints
