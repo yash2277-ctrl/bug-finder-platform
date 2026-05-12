@@ -84,3 +84,5 @@ MIT
 - **2026-08-05**: feat: Add configuration examples
 
 - **2026-08-05**: docs: Add testing documentation
+
+- **2026-05-13**: Update dependencies
