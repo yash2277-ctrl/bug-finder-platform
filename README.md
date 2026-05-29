@@ -86,3 +86,5 @@ MIT
 - **2026-08-05**: docs: Add testing documentation
 
 - **2026-05-13**: Update dependencies
+
+- **2026-05-30**: Fix bugs
