@@ -190,3 +190,4 @@ MIT
 - [2026-01-27 02:27:44] Enhance security
 - [2025-12-21 02:27:44] Improve UI/UX
 - [2026-07-27 02:27:44] Improve error handling
+- [2026-06-03 02:27:44] Add API endpoints
