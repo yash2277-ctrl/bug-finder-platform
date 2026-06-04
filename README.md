@@ -88,3 +88,5 @@ MIT
 - **2026-05-13**: Update dependencies
 
 - **2026-05-30**: Fix bugs
+
+- **2026-06-05**: Update documentation
