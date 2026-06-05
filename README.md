@@ -218,3 +218,4 @@ MIT
 - [2025-12-12 02:27:44] Improve accessibility
 - [2025-12-30 02:27:44] Improve error handling
 - [2026-01-25 02:27:44] Add validation
+- [2026-06-06 02:27:44] Add unit tests
