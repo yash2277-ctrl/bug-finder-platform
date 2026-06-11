@@ -92,3 +92,5 @@ MIT
 - **2026-06-05**: Update documentation
 
 - **2026-06-12**: Add tests
+
+- **2026-06-12**: Update README
