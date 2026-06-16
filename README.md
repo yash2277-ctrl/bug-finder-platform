@@ -96,3 +96,5 @@ MIT
 - **2026-06-12**: Update README
 
 - **2026-06-17**: Add new features
+
+- **2026-06-17**: Update dependencies
