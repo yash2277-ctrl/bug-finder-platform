@@ -100,3 +100,5 @@ MIT
 - **2026-06-17**: Update dependencies
 
 - **2026-06-19**: Update dependencies
+
+- **2026-06-19**: Add new features
