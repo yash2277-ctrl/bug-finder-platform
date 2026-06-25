@@ -278,3 +278,4 @@ MIT
 - [2025-10-29 02:27:44] Improve error handling
 - [2025-12-25 02:27:44] Add comments
 - [2026-07-22 02:27:44] Optimize queries
+- [2026-06-26 02:27:44] Add unit tests
