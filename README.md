@@ -104,3 +104,5 @@ MIT
 - **2026-06-19**: Add new features
 
 - **2026-06-25**: Update documentation
+
+- **2026-06-26**: Update README
