@@ -110,3 +110,5 @@ MIT
 - **2026-06-28**: Improve UI/UX
 
 - **2026-06-30**: Update dependencies
+
+- **2026-07-04**: Add tests
