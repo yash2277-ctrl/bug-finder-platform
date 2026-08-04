@@ -1,0 +1,381 @@
+import axios from 'axios';
+import {
+    getSubdomains, resolveDNS, scanPorts, probeHTTP, checkSSL,
+    detectTech, detectWAF, crawlPage, checkSensitiveFiles, checkVulns,
+    activeVulnScan, checkSSLVulns, checkKnownCVEs, checkExploits,
+    verifyExploit, generateAttackChains, checkCompliance, analyzePageForScreenshot
+} from './scanner_utils.js';
+
+// ═══════════════════════════════════════
+// Main Scan Pipeline — 10 Phases
+// ═══════════════════════════════════════
+
+export async function runScan(domain, scanId, db, broadcast) {
+    const startTime = Date.now();
+
+    const emit = (phase, progress, message) => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        broadcast(scanId, { phase, progress, message, elapsed });
+
+        // Record timeline event
+        try {
+            db.prepare(`INSERT INTO timeline_events (scan_id, event_type, description, timestamp) VALUES (?, ?, ?, ?)`).run(
+                scanId, `phase_${phase}`, message, new Date().toISOString()
+            );
+        } catch (e) { }
+    };
+
+    try {
+        db.prepare(`UPDATE scans SET status = 'running', started_at = ? WHERE id = ?`).run(new Date().toISOString(), scanId);
+        emit(1, 0, `Starting scan for ${domain}...`);
+
+        // ═══════════════════════════════════════
+        // Phase 1: Subdomain Enumeration
+        // ═══════════════════════════════════════
+        emit(1, 5, 'Phase 1: Enumerating subdomains (crt.sh, HackerTarget, RapidDNS, DNS brute-force)...');
+        let subdomains = [];
+        try {
+            subdomains = await getSubdomains(domain);
+            const insertSub = db.prepare(`INSERT OR IGNORE INTO subdomains (scan_id, subdomain, source, found_at) VALUES (?, ?, ?, ?)`);
+            const now = new Date().toISOString();
+            for (const sub of subdomains) {
+                const source = sub === domain ? 'root' : 'enumeration';
+                insertSub.run(scanId, sub, source, now);
+            }
+            emit(1, 10, `Found ${subdomains.length} subdomains.`);
+        } catch (err) {
+            emit(1, 10, `Subdomain enumeration partial: ${err.message}`);
+            subdomains = [domain];
+            db.prepare(`INSERT OR IGNORE INTO subdomains (scan_id, subdomain, source, found_at) VALUES (?, ?, ?, ?)`).run(scanId, domain, 'root', new Date().toISOString());
+        }
+
+        // ═══════════════════════════════════════
+        // Phase 2: DNS, Ports & Validation
+        // ═══════════════════════════════════════
+        emit(2, 12, 'Phase 2: Resolving DNS records...');
+
+        // DNS Resolution
+        const dnsRecords = [];
+        const targetsToScan = subdomains.slice(0, 15); // Limit for performance
+        for (const sub of targetsToScan) {
+            try {
+                const records = await resolveDNS(sub);
+                for (const rec of records) {
+                    dnsRecords.push({ domain: sub, ...rec });
+                    db.prepare(`INSERT INTO dns_records (scan_id, domain, record_type, record_value) VALUES (?, ?, ?, ?)`).run(scanId, sub, rec.type, rec.value);
+                }
+            } catch (e) { }
+        }
+        emit(2, 18, `Resolved ${dnsRecords.length} DNS records across ${targetsToScan.length} subdomains.`);
+
+        // Port Scanning
+        emit(2, 20, 'Phase 2: Scanning ports...');
+        const allPorts = [];
+        const hostsToScan = subdomains.slice(0, 8); // Limit to top subdomains for speed
+        for (const sub of hostsToScan) {
+            try {
+                const ports = await scanPorts(sub);
+                for (const p of ports) {
+                    allPorts.push({ host: sub, ...p });
+                    db.prepare(`INSERT INTO ports (scan_id, host, port, state, service, version) VALUES (?, ?, ?, ?, ?, ?)`).run(scanId, sub, p.port, p.state, p.service, p.version || '');
+                }
+            } catch (e) { }
+        }
+        emit(2, 28, `Discovered ${allPorts.length} open ports.`);
+
+        // HTTP Probing & Live Hosts
+        emit(3, 30, 'Phase 3: Probing live hosts...');
+        const liveHosts = [];
+        let primaryHtml = '';
+        let primaryHeaders = {};
+        let primaryUrl = '';
+
+        for (const sub of targetsToScan) {
+            try {
+                const probeResults = await probeHTTP(sub);
+                for (const probe of probeResults) {
+                    liveHosts.push({ host: sub, ...probe });
+                    db.prepare(`INSERT INTO live_hosts (scan_id, host, ip, status_code, server, title) VALUES (?, ?, ?, ?, ?, ?)`).run(
+                        scanId, sub, '', probe.status, probe.server || '', probe.title || ''
+                    );
+
+                    // Use main domain's HTTPS probe as primary
+                    if (sub === domain && probe.url.startsWith('https')) {
+                        primaryHtml = probe.html;
+                        primaryHeaders = probe.headers;
+                        primaryUrl = probe.url;
+                    }
+                }
+            } catch (e) { }
+        }
+
+        // Fallback: use HTTP if no HTTPS
+        if (!primaryUrl) {
+            const fallback = liveHosts.find(h => h.host === domain);
+            if (fallback) {
+                primaryHtml = fallback.html || '';
+                primaryHeaders = fallback.headers || {};
+                primaryUrl = fallback.url || `http://${domain}`;
+            } else {
+                primaryUrl = `http://${domain}`;
+            }
+        }
+
+        emit(3, 38, `Found ${liveHosts.length} live hosts.`);
+
+        // ═══════════════════════════════════════
+        // Phase 4: Screenshots & Technology
+        // ═══════════════════════════════════════
+        emit(4, 40, 'Phase 4: Capturing screenshots...');
+        const screenshotHosts = liveHosts.filter((h, i, arr) => arr.findIndex(x => x.host === h.host) === i).slice(0, 10);
+        for (const host of screenshotHosts) {
+            try {
+                const ssData = analyzePageForScreenshot(host.url, host.html, host.headers);
+                if (ssData) {
+                    db.prepare(`INSERT INTO screenshots (scan_id, url, title, screenshot_data, page_type) VALUES (?, ?, ?, ?, ?)`).run(
+                        scanId, ssData.url, ssData.title, ssData.screenshot_color, ssData.page_type
+                    );
+                }
+            } catch (e) { }
+        }
+        emit(4, 45, `Captured ${screenshotHosts.length} screenshots.`);
+
+        // Technology Detection
+        emit(4, 47, 'Phase 4: Detecting technology stack...');
+        const techStack = [];
+        const seenTech = new Set();
+        for (const host of liveHosts) {
+            const techs = detectTech(host.headers, host.html);
+            for (const t of techs) {
+                const key = `${t.name}-${t.type}`;
+                if (!seenTech.has(key)) {
+                    seenTech.add(key);
+                    techStack.push(t);
+                    db.prepare(`INSERT INTO tech_stack (scan_id, tech_name, tech_version, tech_category, detection_method) VALUES (?, ?, ?, ?, ?)`).run(
+                        scanId, t.name, t.version || '', t.type, 'header+html'
+                    );
+                }
+            }
+        }
+
+        // WAF Detection
+        for (const host of liveHosts.slice(0, 5)) {
+            const wafs = detectWAF(host.headers);
+            for (const waf of wafs) {
+                const key = `${waf.name}-WAF`;
+                if (!seenTech.has(key)) {
+                    seenTech.add(key);
+                    techStack.push({ name: waf.name, version: '', type: 'WAF' });
+                    db.prepare(`INSERT INTO tech_stack (scan_id, tech_name, tech_version, tech_category, detection_method) VALUES (?, ?, ?, ?, ?)`).run(
+                        scanId, waf.name, `${waf.confidence}% confidence`, 'WAF', 'header'
+                    );
+                }
+            }
+        }
+        emit(4, 50, `Identified ${techStack.length} technologies.`);
+
+        // ═══════════════════════════════════════
+        // Phase 5: Deep Crawling
+        // ═══════════════════════════════════════
+        emit(5, 52, 'Phase 5: Crawling and discovering assets...');
+        const allAssets = [];
+        const allEndpoints = [];
+
+        for (const host of liveHosts.slice(0, 10)) {
+            try {
+                const { assets, endpoints, forms, emails, comments } = crawlPage(host.url, host.html);
+
+                for (const asset of assets) {
+                    allAssets.push(asset);
+                    db.prepare(`INSERT INTO assets (scan_id, url, asset_type, discovered_from) VALUES (?, ?, ?, ?)`).run(
+                        scanId, asset.url, asset.type, host.url
+                    );
+                }
+
+                for (const ep of endpoints) {
+                    allEndpoints.push(ep);
+                    db.prepare(`INSERT INTO endpoints (scan_id, url, method, source, parameters) VALUES (?, ?, ?, ?, ?)`).run(
+                        scanId, ep.url, ep.method || 'GET', ep.source || 'crawl', JSON.stringify(ep.params || [])
+                    );
+                }
+
+                // Store emails as assets
+                for (const email of emails) {
+                    db.prepare(`INSERT INTO assets (scan_id, url, asset_type, discovered_from) VALUES (?, ?, ?, ?)`).run(
+                        scanId, email, 'email', host.url
+                    );
+                }
+
+                // Store comments as assets
+                for (const comment of comments.slice(0, 20)) {
+                    db.prepare(`INSERT INTO assets (scan_id, url, asset_type, discovered_from) VALUES (?, ?, ?, ?)`).run(
+                        scanId, comment.substring(0, 500), 'html-comment', host.url
+                    );
+                }
+            } catch (e) { }
+        }
+        emit(5, 58, `Discovered ${allAssets.length} assets, ${allEndpoints.length} endpoints.`);
+
+        // ═══════════════════════════════════════
+        // Phase 6: CVE & Vulnerability Scanning
+        // ═══════════════════════════════════════
+        emit(6, 60, 'Phase 6: Checking known CVEs...');
+        const allVulns = [];
+
+        // Known CVEs
+        const techForCVE = techStack.map(t => ({ tech_name: t.name, tech_version: t.version }));
+        const cveVulns = checkKnownCVEs(techForCVE);
+        for (const v of cveVulns) {
+            allVulns.push(v);
+            db.prepare(`INSERT INTO vulnerabilities (scan_id, cve_id, technology, version, cvss_score, severity, description, poc_available, poc_url, exploitation_guide, vuln_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+                scanId, v.cve_id, v.technology, v.version, v.cvss_score, v.severity, v.description, v.poc_available, v.poc_url, v.exploitation_guide, v.vuln_type || 'Known CVE'
+            );
+        }
+        emit(6, 65, `Found ${cveVulns.length} known CVEs.`);
+
+        // SSL Analysis
+        emit(6, 67, 'Phase 6: Analyzing SSL/TLS...');
+        let sslInfo = null;
+        try {
+            sslInfo = await checkSSL(domain);
+            if (sslInfo) {
+                const sslVulns = checkSSLVulns(sslInfo);
+                for (const v of sslVulns) {
+                    allVulns.push(v);
+                    db.prepare(`INSERT INTO vulnerabilities (scan_id, cve_id, severity, description) VALUES (?, ?, ?, ?)`).run(
+                        scanId, v.cve_id, v.severity, v.desc
+                    );
+                }
+            }
+        } catch (e) { }
+
+        // Sensitive File Discovery
+        emit(6, 70, 'Phase 6: Checking sensitive files...');
+        try {
+            const sensitiveVulns = await checkSensitiveFiles(primaryUrl || `https://${domain}`);
+            for (const v of sensitiveVulns) {
+                allVulns.push(v);
+                db.prepare(`INSERT INTO vulnerabilities (scan_id, cve_id, severity, description, exploitation_guide, vuln_type, affected_url) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+                    scanId, v.cve_id, v.severity, `${v.name}: ${v.desc}`, v.exploit || v.sol, v.vuln_type || 'Sensitive File Exposure', v.affected_url || ''
+                );
+            }
+            emit(6, 75, `Checked 26 sensitive file paths. Found ${sensitiveVulns.length} exposures.`);
+        } catch (e) {
+            emit(6, 75, 'Sensitive file check partial.');
+        }
+
+        // Security Header Analysis
+        emit(7, 77, 'Phase 7: Analyzing security headers...');
+        const headerVulns = checkVulns(primaryUrl || `https://${domain}`, primaryHeaders);
+        for (const v of headerVulns) {
+            allVulns.push(v);
+            // Store exploit info (how to exploit) as exploitation_guide, NOT the fix
+            const exploitGuide = v.exploit || `How to exploit: This ${v.vuln_type || 'security issue'} can be tested with:\ncurl -I ${primaryUrl || 'https://' + domain}\n\nMissing header allows: ${v.desc}\n\nFix: ${v.sol}`;
+            db.prepare(`INSERT INTO vulnerabilities (scan_id, cve_id, severity, description, exploitation_guide, vuln_type) VALUES (?, ?, ?, ?, ?, ?)`).run(
+                scanId, v.cve_id, v.severity, `${v.name}: ${v.desc}`, exploitGuide, v.vuln_type || ''
+            );
+        }
+        emit(7, 80, `Found ${headerVulns.length} header security issues.`);
+
+        // Active Vulnerability Testing
+        emit(7, 82, 'Phase 7: Active vulnerability testing (XSS, SQLi, redirects)...');
+        try {
+            const activeVulns = await activeVulnScan(primaryUrl || `https://${domain}`, primaryHtml);
+            for (const v of activeVulns) {
+                allVulns.push(v);
+                const exploitGuide = v.exploit || `Exploit: ${v.vuln_type || 'Vulnerability'}\nPayload: ${v.payload || 'N/A'}\nAffected URL: ${v.affected_url || 'N/A'}\n\nFix: ${v.sol || 'Apply security patches.'}`;
+                db.prepare(`INSERT INTO vulnerabilities (scan_id, cve_id, severity, description, exploitation_guide, vuln_type, affected_url) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+                    scanId, v.cve_id, v.severity, `${v.name}: ${v.desc}`, exploitGuide, v.vuln_type || '', v.affected_url || ''
+                );
+            }
+            emit(7, 85, `Active testing found ${activeVulns.length} vulnerabilities.`);
+        } catch (e) {
+            emit(7, 85, 'Active testing partial.');
+        }
+
+        // ═══════════════════════════════════════
+        // Phase 8: Exploit Intelligence
+        // ═══════════════════════════════════════
+        emit(8, 87, 'Phase 8: Analyzing exploitability...');
+        const exploitResults = checkExploits(allVulns);
+        const insertExploit = db.prepare(`INSERT INTO exploit_results (scan_id, cve_id, affected_url, exploitable, confidence, payload_used, evidence, risk_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+        for (const e of exploitResults) {
+            insertExploit.run(scanId, e.cve_id, e.affected_url || '', e.exploitable, e.confidence, e.payload_used, e.evidence, e.risk_score);
+        }
+        emit(8, 90, `Analyzed ${exploitResults.length} exploits. ${exploitResults.filter(e => e.exploitable).length} exploitable.`);
+
+        // ═══════════════════════════════════════
+        // Phase 9: Attack Chains & Compliance
+        // ═══════════════════════════════════════
+        emit(9, 92, 'Phase 9: Generating attack chains...');
+        const chains = generateAttackChains(allVulns, subdomains, techStack);
+        const insertChain = db.prepare(`INSERT INTO attack_chains (scan_id, chain_name, steps, impact, severity, risk_score) VALUES (?, ?, ?, ?, ?, ?)`);
+        for (const chain of chains) {
+            insertChain.run(scanId, chain.name, JSON.stringify(chain.steps), chain.impact, chain.severity, chain.risk_score);
+        }
+        emit(9, 95, `Generated ${chains.length} attack chains.`);
+
+        // Compliance Check
+        emit(9, 96, 'Phase 9: Running compliance checks...');
+        const complianceResults = checkCompliance(primaryHeaders, techForCVE, allVulns, sslInfo);
+        const insertCompliance = db.prepare(`INSERT INTO compliance_results (scan_id, framework, category, check_name, status, details) VALUES (?, ?, ?, ?, ?, ?)`);
+        for (const c of complianceResults) {
+            insertCompliance.run(scanId, c.framework, `${c.category_id} — ${c.category}`, c.check, c.status, c.details);
+        }
+        emit(9, 97, `Completed ${complianceResults.length} compliance checks.`);
+
+        // ═══════════════════════════════════════
+        // Phase 10: Report & Complete
+        // ═══════════════════════════════════════
+        emit(10, 98, 'Phase 10: Generating final report...');
+
+        const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+        const critVulns = allVulns.filter(v => v.severity === 'critical').length;
+        const highVulns = allVulns.filter(v => v.severity === 'high').length;
+        const medVulns = allVulns.filter(v => v.severity === 'medium').length;
+        const lowVulns = allVulns.filter(v => v.severity === 'low' || v.severity === 'info').length;
+
+        // Compute risk score
+        let riskScore = Math.min(100, critVulns * 25 + highVulns * 15 + medVulns * 5 + lowVulns * 1);
+        if (riskScore === 0 && allVulns.length === 0) riskScore = 5;
+
+        // Update scan record
+        db.prepare(`UPDATE scans SET status = 'completed', completed_at = ?, risk_score = ?, total_vulnerabilities = ?, critical_count = ?, high_count = ?, medium_count = ?, low_count = ? WHERE id = ?`).run(
+            new Date().toISOString(), riskScore, allVulns.length, critVulns, highVulns, medVulns, lowVulns, scanId
+        );
+
+        emit(10, 100, `Scan complete! Found ${allVulns.length} vulnerabilities in ${totalTime}s. Risk: ${riskScore}/100.`);
+
+        // Broadcast final completion message
+        broadcast(scanId, {
+            phase: 10,
+            progress: 100,
+            message: 'Scan completed successfully.',
+            completed: true,
+            stats: {
+                subdomains: subdomains.length,
+                dns_records: dnsRecords.length,
+                live_hosts: liveHosts.length,
+                open_ports: allPorts.length,
+                technologies: techStack.length,
+                assets: allAssets.length,
+                endpoints: allEndpoints.length,
+                vulnerabilities: allVulns.length,
+                exploits: exploitResults.filter(e => e.exploitable).length,
+                attack_chains: chains.length,
+                compliance_checks: complianceResults.length,
+                risk_score: riskScore,
+                scan_time: totalTime
+            }
+        });
+
+    } catch (error) {
+        console.error(`[SCAN ERROR] ${domain}:`, error);
+        db.prepare(`UPDATE scans SET status = 'failed', completed_at = ? WHERE id = ?`).run(new Date().toISOString(), scanId);
+        broadcast(scanId, {
+            phase: 0, progress: 0,
+            message: `Scan failed: ${error.message}`,
+            error: true
+        });
+    }
+}
