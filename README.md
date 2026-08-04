@@ -73,3 +73,8 @@ This tool is for educational and authorized security testing only. Always obtain
 ## License
 
 MIT
+
+
+## Recent Updates
+
+- **2026-08-05**: feat: Add configuration examples
